@@ -10,9 +10,12 @@ jobs:
   build:
     runs-on: windows-2022
     steps:
-      - name: Checkout UABEA source
+      - name: Checkout UABEA original source
         uses: actions/checkout@v4
         with:
+          repository: nesrak1/UABEA
+          ref: master
+          path: UABEA-src
           fetch-depth: 0
 
       - name: Install .NET 8 SDK
@@ -26,9 +29,9 @@ jobs:
       - name: Patch Avalonia packages for WinRT fallback
         shell: pwsh
         run: |
-          $path = "UABEAvalonia/UABEAvalonia.csproj"
+          $path = "UABEA-src/UABEAvalonia/UABEAvalonia.csproj"
           if (-not (Test-Path $path)) {
-            throw "Cannot find $path. This workflow must run in the nesrak1/UABEA repository."
+            throw "Cannot find $path after checking out nesrak1/UABEA. The upstream repository layout may have changed."
           }
 
           $text = Get-Content -Raw $path
@@ -46,7 +49,7 @@ jobs:
           foreach ($package in $versions.Keys) {
             $pattern = '(<PackageReference\s+Include="' + [regex]::Escape($package) + '"\s+Version=")[^"]+("\s*/>)'
             if (-not [regex]::IsMatch($text, $pattern)) {
-              throw "Expected PackageReference for $package was not found. Source project layout may have changed."
+              throw "Expected PackageReference for $package was not found. The upstream project may have changed."
             }
             $replacement = '${1}' + $versions[$package] + '${2}'
             $text = [regex]::Replace($text, $pattern, $replacement, 1)
@@ -59,12 +62,13 @@ jobs:
           Select-String -Path $path -Pattern 'PackageReference Include="Avalonia|PackageReference Include="AvaloniaEdit.TextMate|PublishAot'
 
       - name: Build UABEA original
+        working-directory: UABEA-src
         run: msbuild UABEAvalonia.sln /restore /p:Configuration=Release
 
       - name: Keep Windows runtime files only
         shell: pwsh
         run: |
-          $runtimePath = "UABEAvalonia/bin/Release/net8.0/runtimes"
+          $runtimePath = "UABEA-src/UABEAvalonia/bin/Release/net8.0/runtimes"
           if (Test-Path $runtimePath) {
             Get-ChildItem -Path $runtimePath -Directory |
               Where-Object { $_.Name -notin @("win-x64", "win7-x64", "win") } |
@@ -75,5 +79,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: uabea-original-winrt-win-x64
-          path: UABEAvalonia/bin/Release/net8.0
+          path: UABEA-src/UABEAvalonia/bin/Release/net8.0
           if-no-files-found: error
