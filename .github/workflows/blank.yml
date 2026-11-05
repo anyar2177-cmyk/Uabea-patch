@@ -9,6 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
+
     steps:
       - name: Checkout UABEA original source
         uses: actions/checkout@v4
@@ -26,16 +27,10 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Patch Avalonia packages for WinRT fallback
+      - name: Patch all Avalonia packages
         shell: pwsh
         run: |
-          $path = "UABEA-src/UABEAvalonia/UABEAvalonia.csproj"
-          if (-not (Test-Path $path)) {
-            throw "Cannot find $path after checking out nesrak1/UABEA. The upstream repository layout may have changed."
-          }
-
-          $text = Get-Content -Raw $path
-          $versions = [ordered]@{
+          $versionMap = @{
             "Avalonia" = "11.3.8"
             "Avalonia.AvaloniaEdit" = "11.3.0"
             "Avalonia.Controls.DataGrid" = "11.3.8"
@@ -46,34 +41,91 @@ jobs:
             "AvaloniaEdit.TextMate" = "11.3.0"
           }
 
-          foreach ($package in $versions.Keys) {
-            $pattern = '(<PackageReference\s+Include="' + [regex]::Escape($package) + '"\s+Version=")[^"]+("\s*/>)'
-            if (-not [regex]::IsMatch($text, $pattern)) {
-              throw "Expected PackageReference for $package was not found. The upstream project may have changed."
-            }
-            $replacement = '${1}' + $versions[$package] + '${2}'
-            $text = [regex]::Replace($text, $pattern, $replacement, 1)
+          $projects = Get-ChildItem -Path "UABEA-src" -Filter "*.csproj" -Recurse
+
+          if (-not $projects) {
+            throw "No project files found."
           }
 
-          $text = $text.Replace('<PublishAot>true</PublishAot>', '<PublishAot>false</PublishAot>')
-          Set-Content -Path $path -Value $text -Encoding utf8
+          $foundPackages = @{}
 
-          Write-Host "Patched project package versions:"
-          Select-String -Path $path -Pattern 'PackageReference Include="Avalonia|PackageReference Include="AvaloniaEdit.TextMate|PublishAot'
+          foreach ($project in $projects) {
+            $content = Get-Content -LiteralPath $project.FullName -Raw
 
-      - name: Build UABEA original
-        working-directory: UABEA-src
-        run: msbuild UABEAvalonia.sln /restore /p:Configuration=Release
+            foreach ($package in $versionMap.Keys) {
+              $pattern = '(<PackageReference\s+Include="' +
+                [regex]::Escape($package) +
+                '"\s+Version=")[^"]+(")'
 
-      - name: Keep Windows runtime files only
+              $matches = [regex]::Matches($content, $pattern)
+
+              if ($matches.Count -gt 0) {
+                $replacement = '$1' + $versionMap[$package] + '$2'
+
+                $content = [regex]::Replace(
+                  $content,
+                  $pattern,
+                  $replacement
+                )
+
+                $foundPackages[$package] = $true
+
+                Write-Host "Updated $package in $($project.Name)"
+              }
+            }
+
+            Set-Content -LiteralPath $project.FullName `
+              -Value $content -Encoding utf8
+          }
+
+          $missing = @(
+            $versionMap.Keys |
+            Where-Object { -not $foundPackages.ContainsKey($_) }
+          )
+
+          if ($missing.Count -gt 0) {
+            throw "Missing package references: $($missing -join ', ')"
+          }
+
+          Write-Host "All Avalonia package references updated."
+
+      - name: Disable Native AOT
         shell: pwsh
         run: |
-          $runtimePath = "UABEA-src/UABEAvalonia/bin/Release/net8.0/runtimes"
-          if (Test-Path $runtimePath) {
-            Get-ChildItem -Path $runtimePath -Directory |
-              Where-Object { $_.Name -notin @("win-x64", "win7-x64", "win") } |
-              Remove-Item -Recurse -Force
+          $project = "UABEA-src/UABEAvalonia/UABEAvalonia.csproj"
+
+          $content = Get-Content -LiteralPath $project -Raw
+
+          $content = $content.Replace(
+            '<PublishAot>true</PublishAot>',
+            '<PublishAot>false</PublishAot>'
+          )
+
+          Set-Content -LiteralPath $project `
+            -Value $content -Encoding utf8
+
+      - name: Build UABEA original
+        shell: pwsh
+        run: |
+          msbuild UABEA-src/UABEAvalonia.sln `
+            /restore `
+            /p:Configuration=Release
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "UABEA build failed."
           }
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $output = "UABEA-src/UABEAvalonia/bin/Release/net8.0"
+
+          if (-not (Test-Path "$output/UABEAvalonia.exe")) {
+            throw "UABEAvalonia.exe was not generated."
+          }
+
+          Write-Host "Build output verified."
+          Get-ChildItem $output
 
       - name: Upload patched UABEA artifact
         uses: actions/upload-artifact@v4
@@ -81,3 +133,4 @@ jobs:
           name: uabea-original-winrt-win-x64
           path: UABEA-src/UABEAvalonia/bin/Release/net8.0
           if-no-files-found: error
+          compression-level: 6
