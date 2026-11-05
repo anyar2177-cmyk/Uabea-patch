@@ -1,0 +1,79 @@
+name: Build UABEA Original - WinRT Compatibility
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout UABEA source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Patch Avalonia packages for WinRT fallback
+        shell: pwsh
+        run: |
+          $path = "UABEAvalonia/UABEAvalonia.csproj"
+          if (-not (Test-Path $path)) {
+            throw "Cannot find $path. This workflow must run in the nesrak1/UABEA repository."
+          }
+
+          $text = Get-Content -Raw $path
+          $versions = [ordered]@{
+            "Avalonia" = "11.3.8"
+            "Avalonia.AvaloniaEdit" = "11.3.0"
+            "Avalonia.Controls.DataGrid" = "11.3.8"
+            "Avalonia.Desktop" = "11.3.8"
+            "Avalonia.Themes.Fluent" = "11.3.8"
+            "Avalonia.Themes.Simple" = "11.3.8"
+            "Avalonia.Diagnostics" = "11.3.8"
+            "AvaloniaEdit.TextMate" = "11.3.0"
+          }
+
+          foreach ($package in $versions.Keys) {
+            $pattern = '(<PackageReference\s+Include="' + [regex]::Escape($package) + '"\s+Version=")[^"]+("\s*/>)'
+            if (-not [regex]::IsMatch($text, $pattern)) {
+              throw "Expected PackageReference for $package was not found. Source project layout may have changed."
+            }
+            $replacement = '${1}' + $versions[$package] + '${2}'
+            $text = [regex]::Replace($text, $pattern, $replacement, 1)
+          }
+
+          $text = $text.Replace('<PublishAot>true</PublishAot>', '<PublishAot>false</PublishAot>')
+          Set-Content -Path $path -Value $text -Encoding utf8
+
+          Write-Host "Patched project package versions:"
+          Select-String -Path $path -Pattern 'PackageReference Include="Avalonia|PackageReference Include="AvaloniaEdit.TextMate|PublishAot'
+
+      - name: Build UABEA original
+        run: msbuild UABEAvalonia.sln /restore /p:Configuration=Release
+
+      - name: Keep Windows runtime files only
+        shell: pwsh
+        run: |
+          $runtimePath = "UABEAvalonia/bin/Release/net8.0/runtimes"
+          if (Test-Path $runtimePath) {
+            Get-ChildItem -Path $runtimePath -Directory |
+              Where-Object { $_.Name -notin @("win-x64", "win7-x64", "win") } |
+              Remove-Item -Recurse -Force
+          }
+
+      - name: Upload patched UABEA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uabea-original-winrt-win-x64
+          path: UABEAvalonia/bin/Release/net8.0
+          if-no-files-found: error
